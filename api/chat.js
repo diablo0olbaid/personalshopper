@@ -3,7 +3,7 @@ import OpenAI from 'openai';
 // ==========================================
 // CONFIGURACIÓN
 // ==========================================
-const MODELO_ID = "oogle/gemini-1.5-flash"; 
+const MODELO_ID = "google/gemini-flash-1.5"; 
 
 const openai = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
