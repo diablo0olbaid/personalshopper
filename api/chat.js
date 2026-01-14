@@ -1,11 +1,10 @@
 import OpenAI from 'openai';
 
 // ==========================================
-// 1. CONFIGURACIÓN DEL MODELO (VERIFICADO ✅)
+// CONFIGURACIÓN
 // ==========================================
-// Usamos el ID exacto obtenido de la lista oficial:
-const MODELO_ID = "google/gemini-3-flash-preview"; 
-
+// Asegúrate de que tu package.json en Vercel tenga "engines": { "node": "18.x" } o superior
+const MODELO_ID = "google/gemini-2.0-flash-exp"; // O el que prefieras de OpenRouter
 const openai = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
   baseURL: "https://openrouter.ai/api/v1",
@@ -16,126 +15,142 @@ const openai = new OpenAI({
 });
 
 // ==========================================
-// 2. WRAPPER PARA CORS (EVITA ERRORES DE RED)
+// CORS WRAPPER (Mejorado)
 // ==========================================
 const allowCors = fn => async (req, res) => {
   res.setHeader('Access-Control-Allow-Credentials', true);
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  // IMPORTANTE: En producción con Dynamic Yield, intenta poner '*' o el dominio específico de Carrefour
+  res.setHeader('Access-Control-Allow-Origin', '*'); 
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
   res.setHeader(
     'Access-Control-Allow-Headers',
     'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
   );
-  
-  // Si es un chequeo del navegador (OPTIONS), respondemos OK y cortamos.
+
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
   }
-  
-  // Ejecutamos la lógica real
   return await fn(req, res);
 }
 
 // ==========================================
-// 3. LÓGICA DEL CHAT
+// HANDLER PRINCIPAL
 // ==========================================
 const handler = async (req, res) => {
-  // Solo aceptamos peticiones POST
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { message } = req.body;
-  const VTEX_ACCOUNT = process.env.VTEX_ACCOUNT; 
+  // IMPORTANTE: Para Carrefour Francia, la cuenta suele ser "carrefourfr" o "carrefour"
+  const VTEX_ACCOUNT = process.env.VTEX_ACCOUNT || "carrefourfr"; 
+
+  console.log("1. Recibido mensaje:", message);
 
   try {
-    // A. Consultar a la IA
+    if (!process.env.OPENROUTER_API_KEY) throw new Error("Falta OPENROUTER_API_KEY");
+
+    // A. Consultar a la IA (Estructura mejorada)
     const completion = await openai.chat.completions.create({
       model: MODELO_ID, 
       messages: [
         {
           role: "system",
-          content: `Eres un asistente experto en compras para un supermercado.
-          Tu trabajo es interpretar lo que pide el usuario y generar una lista de TÉRMINOS DE BÚSQUEDA para el catálogo.
+          content: `Eres un Personal Shopper experto de Carrefour.
+          Tu objetivo es ayudar al usuario con recetas, consejos y encontrar productos.
           
+          OUTPUT ESPERADO: Un JSON puro con esta estructura:
+          {
+            "assistant_reply": "Texto con la respuesta amigable, la receta paso a paso o el consejo.",
+            "search_terms": ["producto1", "producto2", "producto3"]
+          }
+
           REGLAS:
-          1. Analiza el mensaje: "${message}"
-          2. Genera un JSON Array con los productos a buscar.
-          3. Ejemplo: "Ingredientes para torta" -> ["harina", "huevos", "leche", "azucar"]
-          4. Responde ÚNICAMENTE el JSON. Nada de texto extra.`
+          1. Si piden receta, pon los pasos en "assistant_reply" y los ingredientes genéricos en "search_terms".
+          2. Si piden un producto suelto, pon algo breve en "assistant_reply" y el producto en "search_terms".
+          3. "search_terms" debe ser un Array de Strings.
+          4. NO uses Markdown en el JSON. Solo responde el JSON.`
         },
         { role: "user", content: message }
       ],
+      response_format: { type: "json_object" } // Fuerza JSON si el modelo lo soporta
     });
 
-    // B. Limpiar respuesta de la IA (por si manda texto extra)
-    let searchTerms = [];
+    const textResponse = completion.choices[0].message.content;
+    console.log("2. Respuesta IA:", textResponse);
+
+    let parsedResponse = { assistant_reply: "", search_terms: [] };
+    
     try {
-      const textResponse = completion.choices[0].message.content;
-      // Buscamos donde empieza y termina el JSON (corchetes)
-      const jsonStart = textResponse.indexOf('[');
-      const jsonEnd = textResponse.lastIndexOf(']') + 1;
-      
-      if (jsonStart !== -1 && jsonEnd !== -1) {
-        const jsonString = textResponse.substring(jsonStart, jsonEnd);
-        searchTerms = JSON.parse(jsonString);
-      } else {
-        // Fallback si no hay JSON claro
-        searchTerms = [message];
-      }
+        // Intento de parseo directo
+        parsedResponse = JSON.parse(textResponse);
     } catch (e) {
-      console.error("Error parseando IA:", e);
-      searchTerms = [message];
+        // Fallback: búsqueda manual de JSON
+        const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            parsedResponse = JSON.parse(jsonMatch[0]);
+        } else {
+            parsedResponse = { 
+                assistant_reply: textResponse, 
+                search_terms: [message] 
+            };
+        }
     }
 
-    // C. Buscar en VTEX (Paralelo)
-    const productPromises = searchTerms.map(async (term) => {
-      // Usamos el endpoint de búsqueda pública
+    const { assistant_reply, search_terms } = parsedResponse;
+
+    // B. Buscar en VTEX (Paralelo)
+    console.log("3. Buscando en VTEX:", search_terms);
+    
+    const productPromises = search_terms.map(async (term) => {
+      // Usamos el endpoint standard. OJO: Carrefour puede tener seguridad extra.
+      // Prueba cambiando 'vtexcommercestable.com.br' por 'myvtex.com' si falla.
       const vtexUrl = `https://${VTEX_ACCOUNT}.vtexcommercestable.com.br/api/catalog_system/pub/products/search/${encodeURIComponent(term)}?_from=0&_to=2`;
       
       try {
         const response = await fetch(vtexUrl);
-        if (!response.ok) return [];
+        if (!response.ok) {
+            console.error(`Error VTEX ${term}:`, response.status);
+            return [];
+        }
         return await response.json();
       } catch (err) { 
+        console.error(`Fetch Error VTEX ${term}:`, err);
         return []; 
       }
     });
 
     const rawResults = await Promise.all(productPromises);
 
-    // D. Formatear para el Frontend
+    // C. Formatear Productos
     const products = rawResults.flat().map(p => {
         if (!p || !p.items || p.items.length === 0) return null;
         
         const item = p.items[0];
-        const seller = item.sellers[0]; // Tomamos el primer vendedor
+        const seller = item.sellers.find(s => s.commertialOffer.AvailableQuantity > 0) || item.sellers[0];
 
         return {
             id: p.productId,
             name: p.productName,
             img: item.images && item.images.length > 0 ? item.images[0].imageUrl : '',
-            price: seller ? `$${seller.commertialOffer.Price.toLocaleString('es-AR')}` : "Ver Precio",
-            link: p.linkText ? `/${p.linkText}/p` : '#'
+            price: seller ? `${seller.commertialOffer.Price.toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' })}` : "Voir Prix",
+            link: p.linkText ? `https://www.carrefour.fr/p/${p.linkText}` : '#' // Ajustado para Carrefour
         };
     }).filter(p => p !== null);
 
-    // Eliminar duplicados por ID
+    // Eliminar duplicados
     const uniqueProducts = Array.from(new Map(products.map(item => [item.id, item])).values());
 
-    // E. Responder al Frontend
+    // D. Responder al Frontend
     res.status(200).json({
-      reply: uniqueProducts.length > 0 
-             ? `¡Listo! Busqué **${searchTerms.join(", ")}** y encontré estas opciones:` 
-             : `Busqué **${searchTerms.join(", ")}** pero no encontré resultados exactos.`,
+      reply: assistant_reply || "Aquí tienes los productos:",
       products: uniqueProducts
     });
 
   } catch (error) {
-    console.error("CRITICAL ERROR:", error);
-    // Devolvemos el error en JSON para que el frontend no muestre "undefined"
-    res.status(500).json({ error: error.message || 'Error interno del servidor' });
+    console.error("CRITICAL SERVER ERROR:", error);
+    // Devolvemos el error detallado para que sepas qué pasa (quítalo en producción real)
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 }
 
-// Exportamos la función envuelta en el escudo CORS
 export default allowCors(handler);
