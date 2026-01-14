@@ -1,113 +1,101 @@
 import OpenAI from 'openai';
 
-// 1. Configuración de OpenRouter
+// Configuración OpenRouter
 const openai = new OpenAI({
-  apiKey: process.env.OPENROUTER_API_KEY, // TU KEY DE OPENROUTER
-  baseURL: "https://openrouter.ai/api/v1", // URL de OpenRouter
+  apiKey: process.env.OPENROUTER_API_KEY,
+  baseURL: "https://openrouter.ai/api/v1",
   defaultHeaders: {
-    "HTTP-Referer": "https://personal-shopper.vercel.app", // Tu URL (opcional)
+    "HTTP-Referer": "https://tutienda.com",
     "X-Title": "Personal Shopper VTEX",
   }
 });
 
+// Configuración VTEX
+const VTEX_ACCOUNT = process.env.VTEX_ACCOUNT; // Ej: 'jumboargentina'
+
 export default async function handler(req, res) {
-  // Solo permitir POST
+  // 1. MANEJO DE CORS (Vital para Dynamic Yield)
+  res.setHeader('Access-Control-Allow-Credentials', true);
+  res.setHeader('Access-Control-Allow-Origin', '*'); // Permite que DY llame desde la tienda
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
+  );
+
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { message } = req.body;
-  
-  // VARIABLES DE ENTORNO (Configuradas en Vercel)
-  const VTEX_ACCOUNT = process.env.VTEX_ACCOUNT; // Ej: jumboargentina
-  const VTEX_ENV = "vtexcommercestable.com.br"; // Entorno estándar
 
   try {
-    // 2. CEREBRO IA (OpenRouter)
-    // Usamos 'google/gemini-2.0-flash-lite-preview-02-05:free' o 'openai/gpt-3.5-turbo' (barato y rápido)
+    // 2. IA: Extraer términos de búsqueda (JSON)
     const completion = await openai.chat.completions.create({
-      model: "google/gemini-2.0-flash-lite-preview-02-05:free", // Modelo recomendado en OpenRouter (o usa el que prefieras)
+      model: "google/gemini-2.0-flash-lite-preview-02-05:free", // O tu modelo preferido de OpenRouter
       messages: [
         {
           role: "system",
-          content: `Eres un experto en e-commerce. Tu trabajo es interpretar lo que pide el usuario y extraer TÉRMINOS DE BÚSQUEDA para un catálogo.
+          content: `Eres un experto en e-commerce. Tu trabajo es interpretar lo que pide el usuario y extraer TÉRMINOS DE BÚSQUEDA para un catálogo VTEX.
           
           Reglas:
-          1. Si el usuario pide "ingredientes para una pizza", devuelve una lista: ["harina", "tomate triturado", "queso mozzarella"].
-          2. Si el usuario pide un producto específico "Iphone 15", devuelve: ["iphone 15"].
+          1. Si pide "ingredientes para una torta", devuelve: ["harina leudante", "huevos", "azucar", "leche"].
+          2. Si pide "celular samsung", devuelve: ["celular samsung"].
           3. Responde SOLAMENTE con un JSON Array de strings. Sin texto extra.`
         },
         { role: "user", content: message }
       ],
     });
 
-    // Parseamos la respuesta de la IA
     let searchTerms = [];
     try {
-      // Limpiamos por si la IA devuelve bloques de código markdown
       const cleanContent = completion.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '').trim();
       searchTerms = JSON.parse(cleanContent);
     } catch (e) {
-      console.error("Error parseando IA:", e);
-      searchTerms = [message]; // Fallback: buscar el mensaje tal cual
+      searchTerms = [message];
     }
 
-    // 3. BÚSQUEDA EN VTEX (En paralelo)
-    // Endpoint público: /api/catalog_system/pub/products/search/{term}
+    // 3. VTEX: Buscar productos reales
     const productPromises = searchTerms.map(async (term) => {
-      const vtexUrl = `https://${VTEX_ACCOUNT}.${VTEX_ENV}/api/catalog_system/pub/products/search/${encodeURIComponent(term)}?_from=0&_to=2`; // Traemos max 3 productos por término
-      
+      // Usamos el endpoint público de VTEX
+      const vtexUrl = `https://${VTEX_ACCOUNT}.vtexcommercestable.com.br/api/catalog_system/pub/products/search/${encodeURIComponent(term)}?_from=0&_to=2`;
       try {
         const response = await fetch(vtexUrl);
         if (!response.ok) return [];
         return await response.json();
-      } catch (err) {
-        return [];
-      }
+      } catch (err) { return []; }
     });
 
     const rawResults = await Promise.all(productPromises);
 
-    // 4. FORMATEO DE DATOS
+    // 4. FORMATEAR PARA DY
     const products = rawResults.flat().map(p => {
         if (!p || !p.items || p.items.length === 0) return null;
-
-        const item = p.items[0]; // Primer SKU
-        const seller = item.sellers[0]; // Primer vendedor
-        
-        // Intentar obtener la mejor imagen
-        let imageUrl = 'https://placehold.co/200x200?text=Sin+Imagen';
-        if (item.images && item.images.length > 0) {
-            imageUrl = item.images[0].imageUrl;
-        }
-
-        // Formatear precio
-        let price = "Consultar";
-        if (seller && seller.commertialOffer && seller.commertialOffer.Price) {
-            price = `$${seller.commertialOffer.Price.toLocaleString('es-AR')}`;
-        }
-
-        // Construir link al producto
-        const productLink = p.linkText ? `https://${VTEX_ACCOUNT}.myvtex.com/${p.linkText}/p` : '#';
+        const item = p.items[0];
+        const seller = item.sellers[0];
 
         return {
             id: p.productId,
             name: p.productName,
-            img: imageUrl,
-            price: price,
-            link: productLink
+            img: item.images[0] ? item.images[0].imageUrl : 'https://placehold.co/200',
+            price: seller ? `$${seller.commertialOffer.Price.toLocaleString('es-AR')}` : "Ver Precio",
+            link: p.linkText ? `/${p.linkText}/p` : '#' // Link relativo para que funcione en el mismo dominio
         };
-    }).filter(p => p !== null); // Eliminar nulos
+    }).filter(p => p !== null);
 
-    // Eliminar duplicados (por si buscamos términos similares)
+    // Eliminar duplicados
     const uniqueProducts = Array.from(new Map(products.map(item => [item.id, item])).values());
 
-    // Respuesta al Frontend
     res.status(200).json({
-      reply: `Busqué productos para: **${searchTerms.join(", ")}**. Aquí tienes las mejores opciones:`,
+      reply: `Busqué opciones para: **${searchTerms.join(", ")}**.`,
       products: uniqueProducts
     });
 
   } catch (error) {
-    console.error("Server Error:", error);
-    res.status(500).json({ error: 'Error interno conectando con IA o VTEX' });
+    console.error(error);
+    res.status(500).json({ error: 'Error en el servidor Vercel' });
   }
 }
