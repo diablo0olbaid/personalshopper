@@ -1,0 +1,11 @@
+{
+  "name": "hopla-real-vtex",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node api/chat.js"
+  },
+  "dependencies": {
+    "openai": "^4.0.0",
+    "node-fetch": "^3.3.0"
+  }
+}
