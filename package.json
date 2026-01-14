@@ -1,5 +1,5 @@
 {
-  "name": "personal-shopper-ia",
+  "name": "personal-shopper-openrouter",
   "version": "1.0.0",
   "scripts": {
     "start": "node api/chat.js"
