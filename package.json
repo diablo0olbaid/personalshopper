@@ -1,0 +1,11 @@
+{
+  "name": "personal-shopper-api",
+  "version": "1.0.0",
+  "type": "module", 
+  "scripts": {
+    "start": "node api/chat.js"
+  },
+  "dependencies": {
+    "openai": "^4.28.0"
+  }
+}
