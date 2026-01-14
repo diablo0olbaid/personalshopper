@@ -1,91 +1,113 @@
-// api/chat.js
 import OpenAI from 'openai';
 
-// Configuración de OpenAI
+// 1. Configuración de OpenRouter
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY, // La tomaremos de Vercel
+  apiKey: process.env.OPENROUTER_API_KEY, // TU KEY DE OPENROUTER
+  baseURL: "https://openrouter.ai/api/v1", // URL de OpenRouter
+  defaultHeaders: {
+    "HTTP-Referer": "https://personal-shopper.vercel.app", // Tu URL (opcional)
+    "X-Title": "Personal Shopper VTEX",
+  }
 });
 
-// Configuración de VTEX (Variables de entorno)
-const VTEX_ACCOUNT = process.env.VTEX_ACCOUNT; // ej: "carrefourar"
-const VTEX_ENV = 'vtexcommercestable.com.br';
-
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).send('Method not allowed');
+  // Solo permitir POST
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { message } = req.body;
+  
+  // VARIABLES DE ENTORNO (Configuradas en Vercel)
+  const VTEX_ACCOUNT = process.env.VTEX_ACCOUNT; // Ej: jumboargentina
+  const VTEX_ENV = "vtexcommercestable.com.br"; // Entorno estándar
 
   try {
-    // 1. Preguntar a GPT-4 para obtener keywords de búsqueda
-    // Usamos "Function Calling" simulado para que nos de JSON
+    // 2. CEREBRO IA (OpenRouter)
+    // Usamos 'google/gemini-2.0-flash-lite-preview-02-05:free' o 'openai/gpt-3.5-turbo' (barato y rápido)
     const completion = await openai.chat.completions.create({
-      model: "gpt-4-turbo", // O gpt-3.5-turbo
+      model: "google/gemini-2.0-flash-lite-preview-02-05:free", // Modelo recomendado en OpenRouter (o usa el que prefieras)
       messages: [
         {
           role: "system",
-          content: `Eres un asistente de compras experto. Tu trabajo es interpretar lo que pide el usuario y traducirlo a TÉRMINOS DE BÚSQUEDA para un e-commerce.
+          content: `Eres un experto en e-commerce. Tu trabajo es interpretar lo que pide el usuario y extraer TÉRMINOS DE BÚSQUEDA para un catálogo.
           
-          Si el usuario dice "quiero hacer un asado", tú debes devolver un JSON con una lista de términos como ["carne", "carbon", "chorizo"].
-          Si el usuario pide un producto específico, devuelve ese término.
-          
-          Responde SOLO con el JSON puro, sin texto extra.`
+          Reglas:
+          1. Si el usuario pide "ingredientes para una pizza", devuelve una lista: ["harina", "tomate triturado", "queso mozzarella"].
+          2. Si el usuario pide un producto específico "Iphone 15", devuelve: ["iphone 15"].
+          3. Responde SOLAMENTE con un JSON Array de strings. Sin texto extra.`
         },
         { role: "user", content: message }
       ],
     });
 
-    const gptResponse = completion.choices[0].message.content;
+    // Parseamos la respuesta de la IA
     let searchTerms = [];
-    
     try {
-        searchTerms = JSON.parse(gptResponse); // Convertimos la respuesta de IA a Array
+      // Limpiamos por si la IA devuelve bloques de código markdown
+      const cleanContent = completion.choices[0].message.content.replace(/```json/g, '').replace(/```/g, '').trim();
+      searchTerms = JSON.parse(cleanContent);
     } catch (e) {
-        searchTerms = [message]; // Fallback si falla el JSON
+      console.error("Error parseando IA:", e);
+      searchTerms = [message]; // Fallback: buscar el mensaje tal cual
     }
 
-    // 2. Buscar en VTEX Real (Hacemos las peticiones en paralelo)
-    // Endpoint público de búsqueda de VTEX: /api/catalog_system/pub/products/search/{term}
-    
+    // 3. BÚSQUEDA EN VTEX (En paralelo)
+    // Endpoint público: /api/catalog_system/pub/products/search/{term}
     const productPromises = searchTerms.map(async (term) => {
-        const vtexUrl = `https://${VTEX_ACCOUNT}.${VTEX_ENV}/api/catalog_system/pub/products/search/${encodeURIComponent(term)}?_from=0&_to=3`;
-        
-        const response = await fetch(vtexUrl, {
-            method: 'GET',
-            headers: {
-                'Accept': 'application/json',
-                'Content-Type': 'application/json'
-                // Si tu tienda es privada, necesitas agregar aquí los headers:
-                // 'X-VTEX-API-AppKey': process.env.VTEX_KEY,
-                // 'X-VTEX-API-AppToken': process.env.VTEX_TOKEN
-            }
-        });
-        
+      const vtexUrl = `https://${VTEX_ACCOUNT}.${VTEX_ENV}/api/catalog_system/pub/products/search/${encodeURIComponent(term)}?_from=0&_to=2`; // Traemos max 3 productos por término
+      
+      try {
+        const response = await fetch(vtexUrl);
         if (!response.ok) return [];
         return await response.json();
+      } catch (err) {
+        return [];
+      }
     });
 
-    const results = await Promise.all(productPromises);
-    
-    // Aplanamos los resultados (VTEX devuelve arrays de arrays)
-    const flatProducts = results.flat().filter(p => p != null);
+    const rawResults = await Promise.all(productPromises);
 
-    // 3. Formatear para el Frontend
-    // VTEX devuelve un JSON gigante, solo queremos imagen, nombre y precio
-    const formattedProducts = flatProducts.map(p => ({
-        name: p.productName,
-        img: p.items[0].images[0].imageUrl,
-        price: p.items[0].sellers[0].commertialOffer.Price, // Precio real
-        link: p.linkText
-    }));
+    // 4. FORMATEO DE DATOS
+    const products = rawResults.flat().map(p => {
+        if (!p || !p.items || p.items.length === 0) return null;
 
-    // Enviamos respuesta al Frontend
+        const item = p.items[0]; // Primer SKU
+        const seller = item.sellers[0]; // Primer vendedor
+        
+        // Intentar obtener la mejor imagen
+        let imageUrl = 'https://placehold.co/200x200?text=Sin+Imagen';
+        if (item.images && item.images.length > 0) {
+            imageUrl = item.images[0].imageUrl;
+        }
+
+        // Formatear precio
+        let price = "Consultar";
+        if (seller && seller.commertialOffer && seller.commertialOffer.Price) {
+            price = `$${seller.commertialOffer.Price.toLocaleString('es-AR')}`;
+        }
+
+        // Construir link al producto
+        const productLink = p.linkText ? `https://${VTEX_ACCOUNT}.myvtex.com/${p.linkText}/p` : '#';
+
+        return {
+            id: p.productId,
+            name: p.productName,
+            img: imageUrl,
+            price: price,
+            link: productLink
+        };
+    }).filter(p => p !== null); // Eliminar nulos
+
+    // Eliminar duplicados (por si buscamos términos similares)
+    const uniqueProducts = Array.from(new Map(products.map(item => [item.id, item])).values());
+
+    // Respuesta al Frontend
     res.status(200).json({
-        aiReply: `Busqué productos para: ${searchTerms.join(", ")}`,
-        products: formattedProducts
+      reply: `Busqué productos para: **${searchTerms.join(", ")}**. Aquí tienes las mejores opciones:`,
+      products: uniqueProducts
     });
 
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Error conectando con la IA o VTEX' });
+    console.error("Server Error:", error);
+    res.status(500).json({ error: 'Error interno conectando con IA o VTEX' });
   }
 }
