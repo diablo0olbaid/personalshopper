@@ -42,7 +42,7 @@ const handler = async (req, res) => {
   try {
     // 1. CEREBRO IA
     const completion = await openai.chat.completions.create({
-      model: "google/gemini-1.5-flash",
+      model: "google/gemini-3-flash-preview",
       messages: [
         {
           role: "system",
