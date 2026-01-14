@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 // CONFIGURACIÓN
 // ==========================================
 // Usamos el modelo experimental gratuito para velocidad y costo cero
-const MODELO_ID = "google/gemini-2.0-flash-exp:free"; 
+const MODELO_ID = "google/gemini-2.0-flash-thinking-exp:free"; 
 
 const openai = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
